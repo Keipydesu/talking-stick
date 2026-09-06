@@ -1,16 +1,12 @@
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import {
-  clearCliSessionLease,
   createSystemProcessInspector,
   findCliSessionByRoom,
   getCurrentProcessStartedAt,
   resolveCliSessionPath,
   upsertCliSession,
-  type CliSession,
   type DerivedIdentity,
-  type RoomEvent,
-  type RoomMember,
   type WaitForTurnResult
 } from "../index.js";
 import {
@@ -20,8 +16,7 @@ import {
 import { waitForActionableSignal } from "../wait-loop.js";
 import {
   checkGuardianLiveness,
-  spawnGuardian,
-  stopGuardian
+  spawnGuardian
 } from "./guardian.js";
 import { resolveHandoff } from "./handoff.js";
 import {
@@ -41,10 +36,14 @@ import {
   printResult
 } from "./output.js";
 import {
-  requireLeaseSession,
   upsertSessionFromJoin
 } from "./session.js";
 import type { Runtime } from "./runtime.js";
+import {
+  assignTurnSession,
+  releaseTurnSession,
+  takeTurnSession
+} from "./turn-session.js";
 
 export async function handleWaitCommand(
   runtime: Runtime,
@@ -371,86 +370,19 @@ export async function handleTakeCommand(
   const identity = deriveCliIdentity(parsed);
   const reason = resolveTakeoverReason(parsed);
   const operatorOverride = shouldUseOperatorOverride(parsed);
-  const joined = runtime.commands.joinPath(identity, { context_path: contextPath });
-  upsertSessionFromJoin(identity, joined);
-
-  const availability = await runtime.commands.waitForTurn(identity, {
-    room_id: joined.room_id,
-    max_wait_ms: 0
-  });
-
-  if (availability.status === "your_turn") {
-    const guardianPid = await spawnGuardian({
-      agentId: identity.agent_id,
-      canonicalPath: joined.canonical_path,
-      roomId: joined.room_id,
-      leaseId: availability.lease_id,
-      turnId: availability.turn_id,
-      cliEntryUrl,
-      processMetadata: identity.process_metadata
-    });
-
-    upsertCliSession(resolveCliSessionPath(), {
-      agent_id: identity.agent_id,
-      room_id: joined.room_id,
-      canonical_path: joined.canonical_path,
-      workspace_root: joined.workspace_root,
-      lease_id: availability.lease_id,
-      turn_id: availability.turn_id,
-      guardian_pid: guardianPid.pid,
-      guardian_process_started_at: guardianPid.process_started_at,
-      updated_at: new Date().toISOString()
-    });
-
-    printResult(
-      parsed,
-      { ...availability, guardian_pid: guardianPid.pid },
-      () => `Took the stick. Guardian ${guardianPid.pid} is holding the lease.`
-    );
-    return;
-  }
-
-  if (availability.status === "closed") {
-    throw new Error("Takeover is not available: room is closed.");
-  }
-
-  if (availability.status !== "takeover_available" && !operatorOverride) {
-    throw new Error(`Takeover is not available: ${formatWaitResult(availability)}`);
-  }
-
-  const result = runtime.commands.takeoverStick(identity, {
-    room_id: joined.room_id,
-    expected_turn_id: availability.turn_id,
+  const result = await takeTurnSession({
+    runtime,
+    identity,
+    contextPath,
     reason,
-    operator_override: operatorOverride
-  });
-
-  const guardianPid = await spawnGuardian({
-    agentId: identity.agent_id,
-    canonicalPath: joined.canonical_path,
-    roomId: joined.room_id,
-    leaseId: result.lease_id,
-    turnId: result.turn_id,
-    cliEntryUrl,
-    processMetadata: identity.process_metadata
-  });
-
-  upsertCliSession(resolveCliSessionPath(), {
-    agent_id: identity.agent_id,
-    room_id: joined.room_id,
-    canonical_path: joined.canonical_path,
-    workspace_root: joined.workspace_root,
-    lease_id: result.lease_id,
-    turn_id: result.turn_id,
-    guardian_pid: guardianPid.pid,
-    guardian_process_started_at: guardianPid.process_started_at,
-    updated_at: new Date().toISOString()
+    operatorOverride,
+    cliEntryUrl
   });
 
   printResult(
     parsed,
-    { ...result, guardian_pid: guardianPid.pid },
-    () => `Took the stick. Guardian ${guardianPid.pid} is holding the lease.`
+    result,
+    () => `Took the stick. Guardian ${result.guardian_pid} is holding the lease.`
   );
 }
 
@@ -461,20 +393,13 @@ export async function handleReleaseCommand(
   rejectUnsupportedPathOption(parsed, "release");
   const identity = deriveCliIdentity(parsed);
   const contextPath = parsed.positionals[0] ?? process.cwd();
-  const session = requireLeaseSession(identity, contextPath);
   const handoff = await resolveHandoff(parsed);
-  const result = runtime.commands.releaseStick(identity, {
-    room_id: session.room_id,
-    lease_id: session.lease_id as string,
-    expected_turn_id: session.turn_id as number,
+  const result = releaseTurnSession({
+    runtime,
+    identity,
+    contextPath,
     handoff
   });
-
-  clearCliSessionLease(resolveCliSessionPath(), identity.agent_id, session.room_id);
-  stopGuardian(
-    session.guardian_pid,
-    session.guardian_process_started_at ?? null
-  );
 
   printResult(parsed, result, () => {
     const target = result.reserved_for ? ` to ${result.reserved_for}` : "";
@@ -498,20 +423,13 @@ export async function handlePassCommand(
 
   const identity = deriveCliIdentity(parsed);
   const contextPath = parsed.positionals[0] ?? process.cwd();
-  const session = requireLeaseSession(identity, contextPath);
   const handoff = await resolveHandoff(parsed);
-  const result = runtime.commands.releaseStick(identity, {
-    room_id: session.room_id,
-    lease_id: session.lease_id as string,
-    expected_turn_id: session.turn_id as number,
+  const result = releaseTurnSession({
+    runtime,
+    identity,
+    contextPath,
     handoff
   });
-
-  clearCliSessionLease(resolveCliSessionPath(), identity.agent_id, session.room_id);
-  stopGuardian(
-    session.guardian_pid,
-    session.guardian_process_started_at ?? null
-  );
   printResult(parsed, result, () => {
     const reserved = result.reserved_for ? ` Next: ${result.reserved_for}.` : "";
     return `Passed turn.${reserved}`;
@@ -530,109 +448,17 @@ export async function handleAssignCommand(
 
   const identity = deriveCliIdentity(parsed);
   const contextPath = parsed.positionals[1] ?? process.cwd();
-  const session = requireLeaseSession(identity, contextPath);
   const handoff = await resolveHandoff(parsed);
-  const target = resolveAssignmentTarget(
+  const result = assignTurnSession({
     runtime,
     identity,
-    session,
+    contextPath,
     targetSelector,
-    hasOption(parsed, "operator-requested")
-  );
-  const result = runtime.commands.passStick(identity, {
-    room_id: session.room_id,
-    lease_id: session.lease_id as string,
-    expected_turn_id: session.turn_id as number,
-    to_agent_id: target,
     handoff,
-    operator_override: hasOption(parsed, "operator-requested")
+    operatorOverride: hasOption(parsed, "operator-requested")
   });
-
-  clearCliSessionLease(resolveCliSessionPath(), identity.agent_id, session.room_id);
-  stopGuardian(
-    session.guardian_pid,
-    session.guardian_process_started_at ?? null
-  );
 
   printResult(parsed, result, () => `Passed to ${result.reserved_for}.`);
-}
-
-function resolveAssignmentTarget(
-  runtime: Runtime,
-  identity: DerivedIdentity,
-  session: CliSession,
-  selector: string,
-  allowUnreachable = false
-): string {
-  if (selector.includes(":")) {
-    return selector;
-  }
-
-  const state = runtime.commands.getRoomState({
-    room_id: session.room_id,
-    agent_id: identity.agent_id,
-    process_metadata: identity.process_metadata
-  });
-  const health = runtime.commands.getRoomHealth(identity, {
-    context_path: session.workspace_root
-  });
-  const reachableIds = new Set(
-    health.receivers
-      .filter((receiver) => receiver.liveness === "alive")
-      .map((receiver) => receiver.agent_id)
-  );
-  for (const member of state.members) {
-    if (
-      member.wait_intent === "parked" &&
-      member.standby_transport === "cmux" &&
-      member.standby_workspace_id &&
-      member.standby_surface_id &&
-      member.standby_registered_at &&
-      member.standby_last_error === null
-    ) {
-      reachableIds.add(member.agent_id);
-    }
-  }
-  const enforceReachable = !allowUnreachable;
-  const normalizedSelector = selector.toLowerCase();
-  const candidates = state.members.filter((member) => {
-    if (member.agent_id === identity.agent_id || member.status !== "active") {
-      return false;
-    }
-    if (
-      enforceReachable &&
-      !allowUnreachable &&
-      !reachableIds.has(member.agent_id)
-    ) {
-      return false;
-    }
-
-    if (normalizedSelector === "next") {
-      return true;
-    }
-
-    return (
-      member.agent_id.toLowerCase() === normalizedSelector ||
-      member.agent_id.toLowerCase().startsWith(`${normalizedSelector}:`) ||
-      member.display_name?.toLowerCase() === normalizedSelector
-    );
-  });
-
-  if (candidates.length === 0) {
-    throw new Error(
-      enforceReachable
-        ? `No reachable room member matched assignment target: ${selector}. Release for fair routing or use --operator-requested for an explicit override.`
-        : `No active room member matched assignment target: ${selector}`
-    );
-  }
-
-  const events = runtime.commands.getRoomEvents({
-    room_id: session.room_id,
-    agent_id: identity.agent_id,
-    limit: 500,
-    process_metadata: identity.process_metadata
-  });
-  return pickFairAssignmentCandidate(candidates, events).agent_id;
 }
 
 function rejectUnsupportedPathOption(
@@ -644,43 +470,4 @@ function rejectUnsupportedPathOption(
       `tt ${commandName} takes its workspace path positionally; --path is not supported.`
     );
   }
-}
-
-function pickFairAssignmentCandidate(
-  candidates: RoomMember[],
-  events: RoomEvent[]
-): RoomMember {
-  const lastOwnership = new Map<string, string>();
-  for (const event of events) {
-    if (
-      (event.event_type === "claim" || event.event_type === "takeover") &&
-      event.to_agent_id
-    ) {
-      lastOwnership.set(event.to_agent_id, event.created_at);
-    }
-  }
-
-  return candidates
-    .slice()
-    .sort((left, right) => {
-      const leftTier = left.wait_intent === "active" ? 0 : 1;
-      const rightTier = right.wait_intent === "active" ? 0 : 1;
-      if (leftTier !== rightTier) {
-        return leftTier - rightTier;
-      }
-      const leftLastOwned = lastOwnership.get(left.agent_id);
-      const rightLastOwned = lastOwnership.get(right.agent_id);
-
-      if (!leftLastOwned && rightLastOwned) {
-        return -1;
-      }
-      if (leftLastOwned && !rightLastOwned) {
-        return 1;
-      }
-      if (leftLastOwned && rightLastOwned && leftLastOwned !== rightLastOwned) {
-        return Date.parse(leftLastOwned) - Date.parse(rightLastOwned);
-      }
-
-      return left.ordinal - right.ordinal;
-    })[0];
 }

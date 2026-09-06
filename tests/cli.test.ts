@@ -738,6 +738,56 @@ describe("tt turn commands", () => {
     expect(passed.reserved_for).toBe("human:next");
   });
 
+  test("tt take persists a guarded lease and release clears it", async () => {
+    const { project } = setupIsolatedCli(tempDirs);
+    let guardianPid: number | undefined;
+
+    try {
+      const taken = JSON.parse(await captureStdout([
+        "take",
+        project,
+        "--agent",
+        "human:owner",
+        "--json"
+      ])) as { guardian_pid: number; lease_id: string; turn_id: number };
+      guardianPid = taken.guardian_pid;
+
+      const activeSession = readCliSessions(resolveCliSessionPath()).find(
+        (session) => session.agent_id === "human:owner"
+      );
+      expect(activeSession).toMatchObject({
+        lease_id: taken.lease_id,
+        turn_id: taken.turn_id,
+        guardian_pid: guardianPid
+      });
+      expect(isPidAlive(guardianPid)).toBe(true);
+
+      await captureStdout([
+        "release",
+        project,
+        "--agent",
+        "human:owner",
+        "--status",
+        "Owner is done.",
+        "--next-action",
+        "Continue normally.",
+        "--json"
+      ]);
+
+      const releasedSession = readCliSessions(resolveCliSessionPath()).find(
+        (session) => session.agent_id === "human:owner"
+      );
+      expect(releasedSession).toMatchObject({
+        lease_id: null,
+        turn_id: null,
+        guardian_pid: null
+      });
+    } finally {
+      await releaseIfHeld(project, "human:owner");
+      killPidIfAlive(guardianPid);
+    }
+  });
+
   test("tt wait returns a live guardian pid", async () => {
     const { project } = setupIsolatedCli(tempDirs);
     let guardianPid: number | undefined;
