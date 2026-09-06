@@ -248,6 +248,8 @@ Use `/quit` to close chat while remaining a room member, or `/leave` to remove
 your membership. Chat never takes the stick automatically. If you explicitly
 use `/take`, a normal lease guardian protects the turn; chat will refuse to
 quit while you own it until you `/release`, `/pass`, or confirm `/quit --force`.
+Forced quit releases the turn before exiting. If that release fails, chat
+preserves the guardian and session record and prints a recovery path.
 
 `[path]` defaults to the current working directory. Omit it for normal in-repo coordination; pass it only when you intentionally want a different or nested room.
 

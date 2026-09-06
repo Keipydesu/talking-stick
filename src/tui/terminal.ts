@@ -57,6 +57,7 @@ export class ChatScreen {
 
   redraw(): void {
     this.eraseManagedRegion();
+    if (!this.terminal.outputIsTTY) return;
     this.terminal.output.write(`${this.status()}\n`);
     this.readlineInterface.setPrompt(this.prompt);
     this.readlineInterface.prompt(true);
@@ -65,8 +66,14 @@ export class ChatScreen {
 
   private eraseManagedRegion(): void {
     if (!this.terminal.outputIsTTY || !this.drawn) return;
-    readline.clearLine(this.terminal.output, 0);
-    readline.cursorTo(this.terminal.output, 0);
+    const wrappedInputRows = this.readlineInterface.getCursorPos().rows;
+    for (let row = 0; row <= wrappedInputRows; row += 1) {
+      readline.clearLine(this.terminal.output, 0);
+      readline.cursorTo(this.terminal.output, 0);
+      if (row < wrappedInputRows) {
+        readline.moveCursor(this.terminal.output, 0, -1);
+      }
+    }
     readline.moveCursor(this.terminal.output, 0, -1);
     readline.clearLine(this.terminal.output, 0);
     readline.cursorTo(this.terminal.output, 0);

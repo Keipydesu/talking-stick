@@ -8,7 +8,8 @@ import {
   deriveHumanCliIdentity,
   readCliSessions,
   resolveCliSessionPath,
-  TalkingStickService
+  TalkingStickService,
+  writeCliSessions
 } from "../src/index.js";
 import { createRuntime } from "../src/cli/runtime.js";
 import { runChatApp } from "../src/tui/app.js";
@@ -37,6 +38,7 @@ describe("interactive room chat", () => {
 
       expect(harness.outputText()).toContain("→ tt msg send room 'hello from chat'");
       expect(harness.outputText()).toContain("You remain a room member");
+      expect(harness.outputText()).not.toContain("-- project ·");
       expect(roomEvents(harness.project).filter(
         (event) => event.payload?.body === "hello from chat"
       )).toHaveLength(1);
@@ -155,6 +157,64 @@ describe("interactive room chat", () => {
       harness.close();
     }
   });
+
+  test("a failed exit release preserves the guardian and recoverable session", async () => {
+    const harness = startChat(tempDirs);
+    const outcome = harness.app.then(
+      () => null,
+      (error: unknown) => error
+    );
+    let guardianPid: number | undefined;
+    try {
+      await waitFor(() => harness.outputText().includes("Type a message"));
+      harness.input.write("/take\n");
+      await waitFor(() => {
+        const session = readCliSessions(resolveCliSessionPath()).find(
+          (candidate) => candidate.agent_id === "human:chat-test"
+        );
+        guardianPid = session?.guardian_pid ?? undefined;
+        return Boolean(session?.lease_id && guardianPid);
+      }, 5_000);
+
+      const sessionsPath = resolveCliSessionPath();
+      const sessions = readCliSessions(sessionsPath);
+      const owned = sessions.find(
+        (candidate) => candidate.agent_id === "human:chat-test"
+      );
+      if (!owned?.turn_id) throw new Error("Expected an owned chat session.");
+      owned.turn_id += 99;
+      writeCliSessions(sessionsPath, sessions);
+
+      harness.input.end();
+      const error = await outcome;
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/guardian and CLI session were preserved/);
+
+      const service = new TalkingStickService();
+      try {
+        const room = service.listRooms({ context_path: harness.project }).rooms[0];
+        expect(room?.owner).toBe("human:chat-test");
+      } finally {
+        service.close();
+      }
+      const preserved = readCliSessions(sessionsPath).find(
+        (candidate) => candidate.agent_id === "human:chat-test"
+      );
+      expect(preserved?.lease_id).toEqual(expect.any(String));
+      expect(preserved?.guardian_pid).toBe(guardianPid);
+      expect(isProcessAlive(guardianPid)).toBe(true);
+      expect(harness.outputText()).toContain("Resolve the cause, then run `tt release`");
+    } finally {
+      if (guardianPid) {
+        try {
+          process.kill(guardianPid, "SIGTERM");
+        } catch {
+          // The regression intentionally leaves the guardian running.
+        }
+      }
+      harness.close();
+    }
+  });
 });
 
 function startChat(tempDirs: string[]) {
@@ -221,5 +281,15 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error("Timed out waiting for condition.");
     await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function isProcessAlive(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }

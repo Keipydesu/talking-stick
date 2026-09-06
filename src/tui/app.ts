@@ -16,7 +16,6 @@ import type { Runtime } from "../cli/runtime.js";
 import { upsertSessionFromJoin } from "../cli/session.js";
 import {
   assignTurnSession,
-  finishTurnSession,
   releaseTurnSession,
   takeTurnSession
 } from "../cli/turn-session.js";
@@ -55,12 +54,13 @@ export async function runChatApp(options: ChatAppOptions): Promise<void> {
   upsertSessionFromJoin(options.identity, joined);
 
   let state = createChatState(joined);
-  const backlog = options.runtime.commands.getRoomEventsView({
+  const backlogView = options.runtime.commands.getRoomEventsView({
     room_id: joined.room_id,
     agent_id: options.identity.agent_id,
     process_metadata: options.identity.process_metadata,
     include_all: false
-  }).events.slice(-50);
+  });
+  const backlog = backlogView.events.slice(-50);
   state = updateChatState(state, {
     type: "events",
     events: backlog,
@@ -89,7 +89,9 @@ export async function runChatApp(options: ChatAppOptions): Promise<void> {
   const screen = new ChatScreen(
     options.terminal,
     rl,
-    () => renderStatusBar(state, { width: options.terminal.columns() })
+    () => renderStatusBar(state, {
+      width: Math.max(1, options.terminal.columns() - 1)
+    })
   );
   let stopped = false;
   const stop = (reason?: string) => {
@@ -138,6 +140,9 @@ export async function runChatApp(options: ChatAppOptions): Promise<void> {
     `Joined ${joined.canonical_path} as ${joined.agent_id}.`,
     ...(joined.warning ? [`Warning: ${joined.warning}`] : []),
     "Type a message for the room, or / for actions. /quit detaches; /leave leaves.",
+    ...(backlogView.hidden?.events.older_count
+      ? [`… ${backlogView.hidden.events.older_count} older events hidden; use \`tt events --all\` for the full audit log.`]
+      : []),
     ...backlog.map((event) =>
       renderEvent({ event, historical: true }, { color: options.terminal.outputIsTTY })
     )
@@ -152,7 +157,8 @@ export async function runChatApp(options: ChatAppOptions): Promise<void> {
     },
     screen,
     isStopped: () => stopped,
-    stop
+    stop,
+    pollWaitMs: options.pollWaitMs ?? joined.policy.waitForEventsMaxWaitMs
   });
 
   try {
@@ -201,13 +207,13 @@ export async function runChatApp(options: ChatAppOptions): Promise<void> {
             next_action: "Continue normally."
           }
         });
-      } catch {
-        const session = findCliSessionByRoom(
-          resolveCliSessionPath(),
-          options.identity.agent_id,
-          joined.room_id
-        );
-        if (session) finishTurnSession(options.identity, session);
+      } catch (error) {
+        const cause = error instanceof Error ? error.message : String(error);
+        const recovery =
+          `Could not release the stick while closing chat: ${cause} ` +
+          "The guardian and CLI session were preserved. Resolve the cause, then run `tt release` or reopen `tt chat`.";
+        screen.finish(renderError(recovery, options.terminal.outputIsTTY));
+        throw new Error(recovery, { cause: error });
       }
     }
   }
@@ -563,7 +569,7 @@ async function pollRoom(input: ChatAppOptions & {
         process_metadata: input.identity.process_metadata,
         after_event_seq: input.getState().cursor,
         target_agent_id: "any",
-        max_wait_ms: input.pollWaitMs ?? 1_000
+        max_wait_ms: input.pollWaitMs
       });
       if (input.isStopped()) break;
       if (result.events.length > 0) {
@@ -579,17 +585,33 @@ async function pollRoom(input: ChatAppOptions & {
           break;
         }
       }
-      input.setState(updateChatState(input.getState(), {
+      const refreshed = updateChatState(input.getState(), {
         type: "room_state",
         value: input.runtime.commands.getRoomState({
           room_id: input.roomId,
           agent_id: input.identity.agent_id,
           process_metadata: input.identity.process_metadata
         })
-      }));
+      });
+      input.setState(refreshed);
+      if (!refreshed.members.some((member) => member.agent_id === input.identity.agent_id)) {
+        input.stop("You are no longer a room member. Run `tt chat` to join again.");
+        break;
+      }
     } catch (error) {
       if (input.isStopped()) break;
-      input.stop(`Chat stopped: ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      if (/SQLITE_BUSY|database is locked/i.test(message)) {
+        input.screen.write(
+          renderError(
+            `Temporary database contention: ${message}`,
+            input.terminal.outputIsTTY
+          )
+        );
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        continue;
+      }
+      input.stop(`Chat stopped: ${message}`);
     }
   }
 }
