@@ -1556,6 +1556,21 @@ describe("tt room commands", () => {
     }
   });
 
+  test("tt chat refuses non-interactive input with a streaming alternative", async () => {
+    const { project } = setupIsolatedCli(tempDirs);
+    await expect(captureStdout(["chat", project])).rejects.toThrow(
+      /requires an interactive terminal.*events --follow/
+    );
+  });
+
+  test("tt chat refuses a harness identity before entering the UI", async () => {
+    const { project } = setupIsolatedCli(tempDirs);
+    process.env.TT_HARNESS_AGENT_ID = "codex:chat-guard";
+    await expect(captureStdout(["chat", project])).rejects.toThrow(
+      /interactive human sessions.*tt wait --json/
+    );
+  });
+
   test("tt leave removes this identity and deletes the last-member room", async () => {
     const { project } = setupIsolatedCli(tempDirs);
 

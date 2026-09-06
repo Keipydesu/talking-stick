@@ -209,6 +209,7 @@ The same `tt` binary also works as a human CLI, useful for watching or participa
 ```text
 tt whoami [--explain]                                      # show the resolved CLI identity
 tt list [path]                                            # list rooms
+tt chat [path]                                            # join and converse in an interactive terminal (alias: tt tui)
 tt join [path] [--force-new]                              # join the room for path
 tt leave [path]                                           # leave the room for path
 tt wait [path] [--timeout 110s] [--park] [--after N]          # ownership + events; saved cursor by default
@@ -234,6 +235,19 @@ tt install <harness...> | --all [--print] [--copy] [--link] [--replace] # instal
 tt uninstall <harness...|agents> | --all | --shared [--print]            # remove skill
 tt self-update [--print] [--manager npm|pnpm|yarn|bun]    # update to the latest published tt
 ```
+
+For the easiest human workflow, run `tt chat` inside a project. It joins the
+project's room automatically, shows recent activity, and keeps new events
+flowing in the same terminal. Type ordinary text and press Enter to send it to
+the whole room. Type `/` or `/help` for a discoverable action list; guided
+prompts handle structured handoffs such as `/release` and `/assign`, and Tab
+completes action and member names. The UI echoes the equivalent `tt` command
+after each action so it also teaches the underlying CLI.
+
+Use `/quit` to close chat while remaining a room member, or `/leave` to remove
+your membership. Chat never takes the stick automatically. If you explicitly
+use `/take`, a normal lease guardian protects the turn; chat will refuse to
+quit while you own it until you `/release`, `/pass`, or confirm `/quit --force`.
 
 `[path]` defaults to the current working directory. Omit it for normal in-repo coordination; pass it only when you intentionally want a different or nested room.
 

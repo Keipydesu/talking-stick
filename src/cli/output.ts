@@ -290,6 +290,7 @@ export function printHelp(): void {
 Commands:
   tt whoami [--explain]
   tt list [path]
+  tt chat [path]
   tt join [path] [--force-new]
   tt leave [path]
   tt kick <agent_id> [path] [--reason TEXT] [--force]

@@ -1,4 +1,5 @@
 import { runGuardCommand } from "./guardian.js";
+import { handleChatCommand } from "./chat-command.js";
 import { runClaudeStopHookCommand } from "./claude-stop-hook.js";
 import { runGrokSessionHookCommand } from "./grok-session-hook.js";
 import {
@@ -128,6 +129,17 @@ export const COMMAND_REGISTRY: CommandEntry[] = [
     usage: "tt list [path]",
     description: "List rooms under a path.",
     handler: ({ runtime, parsed }) => handleListCommand(requireRuntime(runtime), parsed)
+  },
+  {
+    name: "chat",
+    aliases: ["tui"],
+    needsRuntime: true,
+    startupMaintenance: true,
+    internal: false,
+    usage: "tt chat [path]",
+    description: "Join a room and chat through an interactive terminal UI.",
+    handler: ({ runtime, parsed, cliEntryUrl }) =>
+      handleChatCommand(requireRuntime(runtime), parsed, cliEntryUrl)
   },
   {
     name: "join",
