@@ -8,6 +8,7 @@ import {
   renderTeachingCommand,
   shellQuote
 } from "../src/tui/render.js";
+import { normalizeTerminalColumns } from "../src/tui/terminal.js";
 
 describe("chat rendering", () => {
   test("formats messages and dims historical events only with color", () => {
@@ -32,6 +33,12 @@ describe("chat rendering", () => {
     const state = createChatState(joinResult());
     state.room = { ...state.room, state: "owner_gone", owner: "claude:one" };
     expect(renderStatusBar(state)).toContain("takeover available (owner_gone) — /take");
+  });
+
+  test("uses an 80-column fallback for sizeless pseudo-terminals", () => {
+    expect(normalizeTerminalColumns(0)).toBe(80);
+    expect(normalizeTerminalColumns(undefined)).toBe(80);
+    expect(normalizeTerminalColumns(120)).toBe(120);
   });
 
   test("shell-quotes teaching commands so they are copyable", () => {

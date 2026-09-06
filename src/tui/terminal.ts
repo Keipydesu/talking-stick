@@ -15,12 +15,16 @@ export function createProcessTerminal(): ChatTerminal {
     output: process.stdout,
     inputIsTTY: process.stdin.isTTY === true,
     outputIsTTY: process.stdout.isTTY === true,
-    columns: () => process.stdout.columns ?? 80,
+    columns: () => normalizeTerminalColumns(process.stdout.columns),
     onResize: (listener) => {
       process.stdout.on("resize", listener);
       return () => process.stdout.off("resize", listener);
     }
   };
+}
+
+export function normalizeTerminalColumns(columns: number | undefined): number {
+  return columns || 80;
 }
 
 export class ChatScreen {
