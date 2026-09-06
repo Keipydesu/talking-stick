@@ -1913,6 +1913,7 @@ export class TalkingStickService {
 
   async waitForEvents(input: WaitForEventsInput): Promise<WaitForEventsResult> {
     assertNonEmpty(input.room_id, "room_id");
+    input.signal?.throwIfAborted();
     this.requireRoom(input.room_id);
 
     const targetFilter = input.target_agent_id ?? "self";
@@ -1949,6 +1950,7 @@ export class TalkingStickService {
     const deadline = Date.now() + maxWaitMs;
 
     while (true) {
+      input.signal?.throwIfAborted();
       const events = this.queryEvents({
         room_id: input.room_id,
         after_event_seq: afterEventSeq,
@@ -1968,7 +1970,12 @@ export class TalkingStickService {
       }
 
       const remainingMs = deadline - Date.now();
-      await sleep(Math.min(this.policy.waitForEventsPollMs, remainingMs));
+      await sleep(
+        Math.min(this.policy.waitForEventsPollMs, remainingMs),
+        undefined,
+        { signal: input.signal }
+      );
+      input.signal?.throwIfAborted();
     }
   }
 

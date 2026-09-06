@@ -248,6 +248,30 @@ describe("out-of-band signaling substrate", () => {
     expect(result).toEqual({ events: [], cursor_event_seq: 0 });
   });
 
+  test("waitForEvents aborts an in-flight sleep", async () => {
+    const harness = createHarness({
+      policy: {
+        waitForEventsMaxWaitMs: 10_000,
+        waitForEventsPollMs: 1_000
+      }
+    });
+    const room = joinPair(harness);
+    const cursor = harness.service.getLatestEventSeq({ room_id: room.room_id });
+    const controller = new AbortController();
+
+    const waiting = harness.service.waitForEvents({
+      agent_id: "codex:test",
+      room_id: room.room_id,
+      after_event_seq: cursor,
+      target_agent_id: "any",
+      max_wait_ms: 10_000,
+      signal: controller.signal
+    });
+    setTimeout(() => controller.abort(), 10);
+
+    await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   test("waitForEvents target self includes direct and other-authored broadcasts", async () => {
     const harness = createHarness();
     const room = joinPair(harness);
@@ -955,9 +979,9 @@ function createHarness(options: { policy?: Partial<Policy> } = {}) {
     dbPath,
     now: clock.now,
     policy: {
-      ...options.policy,
       waitForEventsMaxWaitMs: 5,
-      waitForEventsPollMs: 1
+      waitForEventsPollMs: 1,
+      ...options.policy
     }
   });
   services.push(service);

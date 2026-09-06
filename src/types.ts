@@ -576,6 +576,7 @@ export interface WaitForEventsInput {
   from_agent_id?: AgentId;
   max_wait_ms?: number;
   process_metadata?: ProcessMetadata;
+  signal?: AbortSignal;
 }
 
 export interface WaitForEventsResult {

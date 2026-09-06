@@ -93,10 +93,12 @@ export async function runChatApp(options: ChatAppOptions): Promise<void> {
       width: Math.max(1, options.terminal.columns() - 1)
     })
   );
+  const pollAbort = new AbortController();
   let stopped = false;
   const stop = (reason?: string) => {
     if (stopped) return;
     stopped = true;
+    pollAbort.abort();
     if (reason) {
       state = updateChatState(state, { type: "stop", reason });
       screen.finish(reason);
@@ -158,7 +160,8 @@ export async function runChatApp(options: ChatAppOptions): Promise<void> {
     screen,
     isStopped: () => stopped,
     stop,
-    pollWaitMs: options.pollWaitMs ?? joined.policy.waitForEventsMaxWaitMs
+    pollWaitMs: options.pollWaitMs ?? joined.policy.waitForEventsMaxWaitMs,
+    signal: pollAbort.signal
   });
 
   try {
@@ -560,6 +563,7 @@ async function pollRoom(input: ChatAppOptions & {
   screen: ChatScreen;
   isStopped: () => boolean;
   stop: (reason?: string) => void;
+  signal: AbortSignal;
 }): Promise<void> {
   while (!input.isStopped()) {
     try {
@@ -569,7 +573,8 @@ async function pollRoom(input: ChatAppOptions & {
         process_metadata: input.identity.process_metadata,
         after_event_seq: input.getState().cursor,
         target_agent_id: "any",
-        max_wait_ms: input.pollWaitMs
+        max_wait_ms: input.pollWaitMs,
+        signal: input.signal
       });
       if (input.isStopped()) break;
       if (result.events.length > 0) {

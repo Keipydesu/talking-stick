@@ -47,6 +47,23 @@ describe("interactive room chat", () => {
     }
   });
 
+  test("quiet-room quit cancels the production-length event wait", async () => {
+    const harness = startChat(tempDirs, { productionPoll: true });
+    try {
+      await waitFor(() => harness.outputText().includes("Type a message"));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      const startedAt = Date.now();
+      harness.input.write("/quit\n");
+      await harness.app;
+
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+      expect(harness.outputText()).not.toContain("Chat stopped:");
+    } finally {
+      harness.close();
+    }
+  });
+
   test("take persists a guarded session, owner quit refuses, and release cleans up", async () => {
     const harness = startChat(tempDirs);
     let guardianPid: number | undefined;
@@ -217,7 +234,10 @@ describe("interactive room chat", () => {
   });
 });
 
-function startChat(tempDirs: string[]) {
+function startChat(
+  tempDirs: string[],
+  settings: { productionPoll?: boolean } = {}
+) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "talking-stick-chat-"));
   tempDirs.push(dataDir);
   process.env.TALKING_STICK_DATA_DIR = dataDir;
@@ -251,7 +271,7 @@ function startChat(tempDirs: string[]) {
     contextPath: project,
     cliEntryUrl: pathToFileURL(path.join(process.cwd(), "src", "cli.ts")).href,
     terminal,
-    pollWaitMs: 20
+    ...(settings.productionPoll ? {} : { pollWaitMs: 20 })
   });
 
   return {
