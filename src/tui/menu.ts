@@ -9,6 +9,7 @@ export interface ActionMenuState {
   selectedActionId: string;
   selectedOptionIndex: number;
   filter: string;
+  searching?: boolean;
   configurations: Record<string, ActionConfiguration>;
 }
 
@@ -42,7 +43,7 @@ export function updateMenu(
   actions: ChatAction[] = CHAT_ACTIONS
 ): ActionMenuState {
   if (event.type === "open") {
-    return { ...state, stage: "browse", filter: "" };
+    return { ...state, stage: "browse", filter: "", searching: false };
   }
   if (event.type === "global_help") {
     return { ...state, stage: "global_help", returnStage: "closed" };
@@ -156,6 +157,16 @@ export function filteredActions(
     action.aliases.some((alias) => alias.includes(normalized)) ||
     action.description.toLowerCase().includes(normalized)
   );
+}
+
+// Number shortcuts refer to the visible page, so every action is reachable
+// without ambiguous multi-digit input. Rendering and input share this window.
+export function menuWindow(state: ActionMenuState, maxRows: number): ChatAction[] {
+  const actions = filteredActions(CHAT_ACTIONS, state.filter);
+  const count = Math.min(9, Math.max(1, maxRows - (maxRows >= 10 ? 7 : 4)));
+  const index = Math.max(0, actions.findIndex((action) => action.id === state.selectedActionId));
+  const start = Math.floor(index / count) * count;
+  return actions.slice(start, start + count);
 }
 
 export function actionConfiguration(

@@ -1,11 +1,13 @@
 import path from "node:path";
 import os from "node:os";
+import { stripVTControlCharacters } from "node:util";
 import { CHAT_ACTIONS } from "./actions.js";
 import { actionAvailability, type CapabilitySnapshot } from "./availability.js";
 import {
   actionConfiguration,
   buildCommandPreview,
   filteredActions,
+  menuWindow,
   selectedAction,
   type ActionMenuState
 } from "./menu.js";
@@ -31,6 +33,7 @@ export interface FrameInput {
   width: number;
   rows: number;
   color?: boolean;
+  scrollOffset?: number;
 }
 
 export function renderEvent(
@@ -119,7 +122,6 @@ export function renderDashboard(
   state: ChatState,
   options: RenderOptions = {}
 ): string[] {
-  const room = path.basename(state.canonicalPath) || state.canonicalPath;
   const theme = renderTheme(options);
   if (options.width && options.width < 48) {
     return [renderStatusBar(state, options)];
@@ -131,7 +133,7 @@ export function renderDashboard(
       renderCwdSummary(state.workingDirectory, active, options.width)
     ];
   }
-  const title = theme.accent(`╭─ tt · ${room} · ${state.room.state}`);
+  const title = theme.accent(`╭─ talking-stick · ${state.room.state}`);
   const members = [...state.members]
     .sort((left, right) => Number(right.status === "active") - Number(left.status === "active"))
     .map((member) => renderMember(state, member, theme));
@@ -160,93 +162,139 @@ export function renderDashboard(
 }
 
 export function renderFrame(input: FrameInput): string[] {
+  const frame = renderBaseFrame(input);
+  const theme = renderTheme({ color: input.color });
+  if (input.menu.stage === "closed" || !input.capability) return frame;
+  const size = popupSize(input.width, input.rows);
+  if (size.width < 6 || size.rows < 3) return frame;
+  const content = renderActionMenu(input.menu, input.capability, {
+    color: input.color, width: size.width - 4, maxRows: size.rows - 2
+  });
+  const popup = [
+    theme.border(`┌${"─".repeat(size.width - 2)}┐`),
+    ...Array.from({ length: size.rows - 2 }, (_, i) => `${theme.border("│")} ${fitWidth(content[i] ?? "", size.width - 4, " ")} ${theme.border("│")}`),
+    theme.border(`└${"─".repeat(size.width - 2)}┘`)
+  ];
+  const left = Math.floor((input.width - size.width) / 2);
+  const top = Math.max(0, Math.floor((input.rows - size.rows - 2) / 2));
+  return frame.map((line, row) => {
+    if (row < top || row >= top + popup.length) return line;
+    // The background remains visible on all sides; reset its colors before
+    // painting the opaque modal so selected rows cannot inherit dim styling.
+    return `${sliceCells(line, 0, left)}${input.color ? RESET : ""}${popup[row - top]}${sliceCells(line, left + size.width, input.width)}`;
+  });
+}
+
+export function popupSize(width: number, rows: number): { width: number; rows: number } {
+  return { width: Math.min(64, Math.max(1, width - 4)), rows: Math.min(19, Math.max(1, rows - 6)) };
+}
+
+export function activitySize(width: number, rows: number): { width: number; rows: number } {
+  if (width < 72 || rows < 12) return { width, rows: Math.max(1, rows - 5) };
+  const sidebar = Math.min(30, Math.max(22, Math.floor(width * 0.27)));
+  return { width: width - sidebar - 2, rows: Math.max(1, rows - 6) };
+}
+
+function renderBaseFrame(input: FrameInput): string[] {
   const width = Math.max(1, input.width);
   const rows = Math.max(1, input.rows);
   const theme = renderTheme({ color: input.color });
-  const room = path.basename(input.state.canonicalPath) || input.state.canonicalPath;
-  if (width < 48 || rows < 8) {
+  if (width < 24 || rows < 8) {
     const compact = [
       renderStatusBar(input.state, { color: input.color, width }),
-      fitWidth(renderInputLine(input.editor), width, " "),
+      renderInputLine(input.editor, width),
       fitWidth("Tab actions · ? help · /quit detach", width, " ")
     ];
     return exactRows(compact, width, rows);
   }
 
   if (width < 72 || rows < 12) {
-    const overlay = renderOverlay(input, width, Math.max(1, rows - 5));
-    const activity = overlay ?? renderActivity(input.state, width, Math.max(1, rows - 5), input.color);
+    const activity = renderActivity(input.state, width, Math.max(1, rows - 5), input.color, input.scrollOffset);
     return exactRows([
-      fitWidth(theme.accent(`tt · ${room} · ${input.state.room.state}`), width, "─"),
+      theme.accent(fitWidth(`talking-stick · ${input.state.room.state}`, width, "─")),
       fitWidth(`cwd  ${displayPath(input.state.workingDirectory, Math.max(1, width - 5))}`, width, " "),
       fitWidth(`turn ${input.state.room.turn_id} · ${plainStick(input.state)}`, width, " "),
       ...activity,
-      fitWidth(renderInputLine(input.editor), width, " "),
-      fitWidth("Tab actions · ? help · /quit detach", width, " ")
+      renderInputLine(input.editor, width),
+      fitWidth("Tab actions · PgUp/PgDn scroll · Ctrl-E live · /quit", width, " ")
     ], width, rows);
   }
 
   const sidebarWidth = Math.min(30, Math.max(22, Math.floor(width * 0.27)));
   const leftWidth = width - sidebarWidth - 1;
-  const contentRows = Math.max(1, rows - 7);
+  const contentRows = Math.max(1, rows - 6);
   const paneWidth = Math.max(1, leftWidth - 1);
-  const overlay = renderOverlay(input, paneWidth, contentRows);
-  const activity = overlay ?? renderActivity(input.state, paneWidth, contentRows, input.color);
+  const activity = renderActivity(input.state, paneWidth, contentRows, input.color, input.scrollOffset);
+  const memberWidth = sidebarWidth - 3;
   const members = [...input.state.members]
     .sort((left, right) => Number(right.status === "active") - Number(left.status === "active"))
-    .map((member) => renderMember(input.state, member, theme));
+    .flatMap((member) => wrapText(renderSidebarMember(input.state, member), memberWidth).map((line, index) => {
+      const self = member.agent_id === input.state.selfAgentId;
+      const operator = isOperator(input.state, member);
+      const holder = member.agent_id === input.state.room.owner;
+      let styled = operator ? theme.operator(line, self) : holder ? theme.holder(line) : line;
+      if (operator && holder && index === 0) {
+        styled = `${theme.holder("o--")}${theme.operator(line.slice(3), self)}`;
+      }
+      return `  ${member.status === "inactive" ? theme.dim(styled) : styled}`;
+    }));
+  const activeMembers = input.state.members.filter((member) => member.status === "active").length;
+  const legend = wrapText("o-- stick · o-> reserved · operator", memberWidth).map((line) =>
+    `  ${line.replace("o-- stick", theme.holder("o-- stick")).replace("operator", theme.operator("operator"))}`
+  );
+  const legendStart = contentRows + 1 - legend.length;
+  const memberRows = Array.from({ length: contentRows + 1 }, (_, index) =>
+    index >= legendStart ? legend[index - legendStart] : members[index] ?? ""
+  );
+  const roomStatus = input.state.room.state === "idle" ? "stick free" : input.state.room.state;
   const result: string[] = [];
   result.push(joinColumns(
-    theme.accent(`┌─ tt · ${room} · ${input.state.room.state}`),
+    theme.accent(fitWidth(`┌─ talking-stick · turn ${input.state.room.turn_id} · ${roomStatus} `, leftWidth, "─")),
     "",
     leftWidth,
     sidebarWidth,
+    theme,
     "┬",
     "─",
     "┐"
   ));
   result.push(joinColumns(
-    `│cwd  ${displayPath(input.state.workingDirectory, Math.max(1, leftWidth - 6))}`,
-    theme.accent("MEMBERS"),
-    leftWidth,
-    sidebarWidth
-  ));
-  result.push(joinColumns(
-    `│turn ${input.state.room.turn_id} · ${plainStick(input.state)}`,
-    members[0] ?? theme.dim("○ no members"),
-    leftWidth,
-    sidebarWidth
-  ));
-  result.push(joinColumns(
-    "├".padEnd(leftWidth, "─"),
-    members[1] ?? "",
+    `${theme.border("│")} ${displayPath(input.state.workingDirectory, Math.max(1, leftWidth - 3))}`,
+    `  ${theme.accent(`MEMBERS · ${activeMembers} active`)}`,
     leftWidth,
     sidebarWidth,
+    theme
+  ));
+  result.push(joinColumns(
+    theme.accent(fitWidth(`├─ TIMELINE · ${input.scrollOffset ? "history · Ctrl-E live" : "live"} `, leftWidth, "─")),
+    memberRows[0] ?? "",
+    leftWidth,
+    sidebarWidth,
+    theme,
     "┤"
   ));
   for (let index = 0; index < contentRows; index += 1) {
-    const memberIndex = index + 2;
-    const right = index === contentRows - 1
-      ? `stick: ${stickHolderLabel(input.state)}`
-      : members[memberIndex] ?? "";
+    const right = memberRows[index + 1] ?? "";
     result.push(joinColumns(
-      `│${fitWidth(activity[index] ?? "", paneWidth, " ")}`,
+      `${theme.border("│")}${fitWidth(activity[index] ?? "", paneWidth, " ")}`,
       right,
       leftWidth,
-      sidebarWidth
+      sidebarWidth,
+      theme
     ));
   }
   result.push(joinColumns(
-    "└".padEnd(leftWidth, "─"),
+    theme.border("└".padEnd(leftWidth, "─")),
     "",
     leftWidth,
     sidebarWidth,
+    theme,
     "┴",
     "─",
     "┘"
   ));
-  result.push(fitWidth(renderInputLine(input.editor), width, " "));
-  result.push(fitWidth("Tab actions · ? help · /quit detach", width, " "));
+  result.push(renderInputLine(input.editor, width));
+  result.push(fitWidth("Tab actions · PgUp/PgDn scroll · Ctrl-E live · ? help · /quit", width, " "));
   return exactRows(result, width, rows);
 }
 
@@ -261,15 +309,22 @@ export function renderActionMenu(
   if (menu.stage === "global_help") {
     return fitRows([
       theme.accent("ACTIONS & HELP"),
-      "Tab on an empty prompt opens actions; type to filter, ↑↓ to move, Enter to run.",
+      "Tab opens actions. j/k or ↑↓ move; 1–9 select; Enter runs.",
       "The stick grants one guarded writer turn. Messages converse; notes persist; handoffs transfer work.",
-      "? shows action help. Esc closes or goes back. Slash commands and Tab completion still work.",
+      "h/l back/options · / search · ? action help · Esc back/close.",
+      "PgUp/PgDn or Ctrl-U/D scroll. Ctrl-E returns to live activity.",
       theme.dim("? / Esc close")
     ], width, maxRows);
   }
 
   const action = selectedAction(menu);
   if (!action) return [];
+  if (menu.stage === "browse" && filteredActions(CHAT_ACTIONS, menu.filter).length === 0) {
+    return menuWithFooter([
+      theme.accent(`ACTIONS · search: ${menu.filter}${menu.searching ? "▏" : ""}`),
+      "No matching actions"
+    ], ["Backspace edits search · / search · Esc closes"], width, maxRows);
+  }
   const configuration = actionConfiguration(menu, action);
   const verdict = actionAvailability(action, snapshot, configuration);
   if (menu.stage === "help") {
@@ -291,38 +346,61 @@ export function renderActionMenu(
       const value = option.kind === "boolean"
         ? `[${configured === true ? "x" : " "}]`
         : typeof configured === "string" && configured ? configured : option.syntax;
-      const row = `${marker} ${option.id.padEnd(14)} ${value} — ${option.description}`;
+      const row = `${marker} ${index + 1} ${option.id.padEnd(14)} ${value}`;
       return index === menu.selectedOptionIndex ? theme.bold(row) : row;
     });
-    return fitRows([
+    const selectedOption = action.options[menu.selectedOptionIndex];
+    return menuWithFooter([
       theme.accent(`${action.name} · options`),
-      ...rows,
+      ...rows
+    ], [
+      theme.border("─".repeat(width ?? 60)),
+      ...wrapText(selectedOption?.description ?? action.description, width ?? 60),
       `Preview: ${buildCommandPreview(action, configuration)}`,
       verdict === true ? "Available now" : `Unavailable: ${verdict}`,
-      theme.dim("↑↓ move · Space edit/toggle · Enter run · ? help · Esc back")
+      theme.dim("j/k move · 1–9 select · Space edit/toggle"),
+      theme.dim("Enter run · h back · ? help · Esc back")
     ], width, maxRows);
   }
 
   const visible = filteredActions(CHAT_ACTIONS, menu.filter);
-  const selectedIndex = Math.max(0, visible.findIndex((candidate) => candidate.id === action.id));
-  const actionRows = Math.max(1, maxRows - 4);
-  const start = Math.max(0, Math.min(selectedIndex - Math.floor(actionRows / 2), visible.length - actionRows));
-  const shown = visible.slice(start, start + actionRows);
-  const rows = shown.map((candidate) => {
+  const shown = menuWindow(menu, maxRows);
+  const rows = shown.map((candidate, index) => {
     const configured = actionConfiguration(menu, candidate);
     const available = actionAvailability(candidate, snapshot, configured);
     const marker = candidate.id === action.id ? ">" : " ";
-    const status = available === true ? "available" : available;
-    const row = `${marker} ${candidate.name.padEnd(13)} ${status}`;
+    const row = `${marker} ${index + 1} ${candidate.name}${available === true ? "" : " · unavailable"}`;
     if (candidate.id === action.id) return theme.bold(row);
     return available === true ? row : theme.dim(row);
   });
-  return fitRows([
-    theme.accent(`ACTIONS${menu.filter ? ` · filter: ${menu.filter}` : ""}`),
-    ...(rows.length > 0 ? rows : [theme.dim("No matching actions")]),
-    `${action.name} — ${action.description}`,
-    theme.dim("↑↓ move · Enter run · → options · ? help · Esc close")
-  ], width, maxRows);
+  const description = wrapText(action.description, width ?? 60);
+  const hints = [
+    theme.dim(menu.searching ? "Type to search · Enter finish · Esc finish" : "j/k move · 1–9 select · Enter run · l options"),
+    theme.dim("h back · / search · ? help · Esc close")
+  ];
+  const footer = maxRows >= 10 ? [
+    theme.border("─".repeat(width ?? 60)),
+    description[0] ?? "",
+    description[1] ?? "",
+    verdict === true ? "Available now" : `Unavailable: ${verdict}`,
+    ...hints
+  ] : [
+    verdict === true ? action.description : `Unavailable: ${verdict}`,
+    ...hints
+  ];
+  return menuWithFooter([
+    theme.accent(`ACTIONS · ${Math.max(0, visible.findIndex((candidate) => candidate.id === action.id)) + 1}/${visible.length}${menu.searching || menu.filter ? ` · search: ${menu.filter}${menu.searching ? "▏" : ""}` : ""}`),
+    ...rows
+  ], footer, width, maxRows);
+}
+
+function menuWithFooter(body: string[], footer: string[], width: number | undefined, rows: number): string[] {
+  const footerRows = footer.slice(-Math.max(1, rows - 2));
+  const bodyRows = rows - footerRows.length;
+  return [
+    ...Array.from({ length: bodyRows }, (_, index) => fitWidth(body[index] ?? "", width, " ")),
+    ...footerRows.map((line) => fitWidth(line, width, " "))
+  ];
 }
 
 export function renderPalette(command?: string): string[] {
@@ -452,6 +530,20 @@ function renderMember(
   return member.status === "inactive" ? theme.dim(rendered) : rendered;
 }
 
+function renderSidebarMember(state: ChatState, member: ChatState["members"][number]): string {
+  const marker = member.agent_id === state.room.owner
+    ? "o--"
+    : member.agent_id === state.room.reserved_for
+      ? "o->"
+      : member.status === "active" ? " ● " : " ○ ";
+  const role = member.agent_id === state.selfAgentId ? " (you)" : isOperator(state, member) ? " (operator)" : "";
+  return `${marker} ${agentLabel(member.agent_id, state.members)}${role}`;
+}
+
+function isOperator(state: ChatState, member: ChatState["members"][number]): boolean {
+  return member.agent_id === state.selfAgentId || member.agent_id.startsWith("human:");
+}
+
 function renderMemberRows(
   label: string,
   members: string[],
@@ -511,8 +603,9 @@ function agentLabel(
   if (sameKind.length === 1) return `${displayName} [${kind}]`;
 
   const value = agentId.slice(kind.length + 1);
-  const suffix = value.length <= 8 ? value : `${value.slice(0, 6)}…`;
-  return `${displayName} [${kind}:${suffix}]`;
+  let length = Math.min(4, value.length);
+  while (length < value.length && sameKind.some((candidate) => candidate.agent_id !== agentId && candidate.agent_id.slice(kind.length + 1).startsWith(value.slice(0, length)))) length += 1;
+  return `${displayName} [${value.slice(0, length)}]`;
 }
 
 function renderAgent(
@@ -526,53 +619,81 @@ function renderAgent(
 
 export function fitWidth(text: string, width?: number, fill?: string): string {
   if (!width || width <= 0) return text;
-  const visible = stripAnsi(text).length;
+  const visible = cellWidth(text);
   if (visible > width) {
     return truncateStyled(text, width);
   }
   return fill ? `${text}${fill.repeat(width - visible)}` : text;
 }
 
-function renderOverlay(input: FrameInput, width: number, rows: number): string[] | null {
-  if (input.menu.stage === "closed" || !input.capability) return null;
-  return renderActionMenu(input.menu, input.capability, {
-    color: input.color,
-    width,
-    maxRows: rows
-  });
-}
-
 function renderActivity(
   state: ChatState,
   width: number,
   rows: number,
-  color: boolean | undefined
+  color: boolean | undefined,
+  scrollOffset = 0
 ): string[] {
+  const lines = timelineLines(state, width, color);
+  if (lines.length === 0) lines.push(...wrapText("No messages yet. Type a message to the room, or press Tab for actions.", width));
+  const offset = Math.min(scrollOffset, Math.max(0, lines.length - rows));
+  const end = lines.length - offset;
+  const visible = lines.slice(Math.max(0, end - rows), end);
+  return Array.from({ length: rows }, (_, index) => fitWidth(visible[index] ?? "", width, " "));
+}
+
+export function timelineLines(state: ChatState, width: number, color: boolean | undefined): string[] {
+  const theme = renderTheme({ color });
   const activity = state.activity.length > 0
     ? state.activity
     : [
       ...state.events.map((entry) => ({ kind: "event" as const, entry })),
       ...state.notices.map((notice) => ({ kind: "notice" as const, notice }))
     ];
-  const lines = activity.flatMap((item) => {
+  const lines: string[] = [];
+  let routine: string[] = [];
+  const flushRoutine = () => {
+    if (routine.length) lines.push(...wrapText(routine.join(" · "), width).map((line) => theme.dim(line)));
+    routine = [];
+  };
+  for (const item of activity) {
     if (item.kind === "event") {
-      return [renderEvent(item.entry, { color, width, members: state.members })];
+      const event = item.entry.event;
+      const time = new Date(event.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+      const from = agentLabel(event.from_agent_id, state.members);
+      const target = agentLabel(event.to_agent_id, state.members);
+      if (event.event_type === "message_sent" || event.handoff) {
+        flushRoutine();
+        if (lines.length && lines.at(-1) !== "") lines.push("");
+        const title = event.event_type === "message_sent"
+          ? `${time}  ${from} → ${event.to_agent_id ? target : "room"}`
+          : `${time}  HANDOFF · ${from}${event.to_agent_id ? ` → ${target}` : " released the stick"}`;
+        lines.push(...wrapText(title, width).map((line) => theme.identity(event.from_agent_id, line)));
+        const body = event.event_type === "message_sent" ? String(event.payload?.body ?? "") : event.handoff?.status ?? "";
+        lines.push(...wrapText(body, Math.max(1, width - 2)).map((line) => `  ${line}`));
+        if (event.handoff?.next_action) {
+          lines.push(...wrapText(`Next: ${event.handoff.next_action}`, Math.max(1, width - 2)).map((line) => `  ${line}`));
+        }
+        lines.push("");
+      } else {
+        routine.push(stripAnsi(renderEvent({ ...item.entry, historical: false }, { members: state.members })));
+      }
+      continue;
     }
-    return item.notice.text.split("\n").map((line) =>
-      item.notice.level === "error"
-        ? renderError(line, color === true)
-        : fitWidth(line, width)
-    );
-  }).slice(-rows);
-  return Array.from({ length: rows }, (_, index) =>
-    fitWidth(lines[index] ?? "", width, " ")
-  );
+    flushRoutine();
+    lines.push(...wrapText(item.notice.text, width).map((line) => item.notice.level === "error" ? theme.error(line) : theme.dim(line)));
+  }
+  flushRoutine();
+  while (lines.at(-1) === "") lines.pop();
+  return lines;
 }
 
-function renderInputLine(editor: EditorSnapshot): string {
+function renderInputLine(editor: EditorSnapshot, width: number): string {
   const before = editor.value.slice(0, editor.cursor);
   const after = editor.value.slice(editor.cursor);
-  return `${editor.prompt}${before}▏${after}`;
+  const prefix = `${editor.prompt}${before}`;
+  // Leave a cell after the cursor for either trailing text or the ellipsis.
+  const start = Math.max(0, cellWidth(prefix) - width + 3);
+  return fitWidth(`${start ? "‹" : ""}${sliceCells(prefix, start, cellWidth(prefix))}▏${after}`, width, " ");
 }
 
 function plainStick(state: ChatState): string {
@@ -583,24 +704,18 @@ function plainStick(state: ChatState): string {
   return state.room.state === "closed" ? "room closed" : "stick free";
 }
 
-function stickHolderLabel(state: ChatState): string {
-  if (state.room.owner === state.selfAgentId) return "you";
-  if (state.room.owner) return agentLabel(state.room.owner, state.members);
-  if (state.room.reserved_for === state.selfAgentId) return "reserved for you";
-  if (state.room.reserved_for) return `reserved: ${agentLabel(state.room.reserved_for, state.members)}`;
-  return "free";
-}
-
 function joinColumns(
   left: string,
   right: string,
   leftWidth: number,
   rightWidth: number,
+  theme: TuiTheme,
   separator = "│",
   rightFill = " ",
   rightEnd = "│"
 ): string {
-  return `${fitWidth(left, leftWidth, " ")}${separator}${fitWidth(right, rightWidth - 1, rightFill)}${rightEnd}`;
+  const rightColumn = fitWidth(right, rightWidth - 1, rightFill);
+  return `${fitWidth(left, leftWidth, " ")}${theme.border(separator)}${rightFill === "─" ? theme.border(rightColumn) : rightColumn}${theme.border(rightEnd)}`;
 }
 
 function exactRows(lines: string[], width: number, rows: number): string[] {
@@ -647,26 +762,76 @@ function displayPath(workingDirectory: string, width?: number): string {
 
 function truncateStyled(text: string, width: number): string {
   if (width <= 1) return "…";
-  const target = width - 1;
+  return `${sliceCells(text, 0, width - 1)}…`;
+}
+
+const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+function graphemeWidth(text: string): number {
+  const code = text.codePointAt(0) ?? 0;
+  if (/^[\p{Mark}\p{Control}\p{Format}]+$/u.test(text)) return 0;
+  if (/\p{Emoji_Presentation}/u.test(text) || text.includes("\ufe0f")) return 2;
+  return code >= 0x1100 && (
+    code <= 0x115f || code === 0x2329 || code === 0x232a ||
+    (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
+    (code >= 0xac00 && code <= 0xd7a3) || (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe10 && code <= 0xfe19) || (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) || (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x20000 && code <= 0x3fffd)
+  ) ? 2 : 1;
+}
+
+export function cellWidth(text: string): number {
+  return [...segmenter.segment(stripAnsi(text))].reduce((sum, entry) => sum + graphemeWidth(entry.segment), 0);
+}
+
+function sliceCells(text: string, start: number, end: number): string {
+  let position = 0;
   let result = "";
-  let visible = 0;
-  let index = 0;
-  while (index < text.length && visible < target) {
-    if (text[index] === "\u001b") {
-      const sequence = text.slice(index).match(/^\u001b\[[0-?]*[ -/]*[@-~]/)?.[0];
-      if (sequence) {
-        result += sequence;
-        index += sequence.length;
-        continue;
+  for (const token of text.split(/(\u001b\[[0-?]*[ -/]*[@-~])/)) {
+    if (token.startsWith("\u001b[")) {
+      result += token;
+      continue;
+    }
+    for (const { segment } of segmenter.segment(token)) {
+      const size = graphemeWidth(segment);
+      const next = position + size;
+      if (position >= start && next <= end) result += segment;
+      else if (next > start && position < end) result += " ".repeat(Math.min(next, end) - Math.max(position, start));
+      position = next;
+    }
+  }
+  return `${result}${text.includes("\u001b[") ? RESET : ""}`;
+}
+
+export function wrapText(text: string, width: number): string[] {
+  const clean = stripVTControlCharacters(text).replace(/\r/g, "").replace(/\t/g, "    ");
+  const lines: string[] = [];
+  for (const paragraph of clean.split("\n")) {
+    let line = "";
+    let size = 0;
+    for (const word of paragraph.split(/(\s+)/)) {
+      const wordWidth = cellWidth(word);
+      if (size && size + wordWidth > width && word.trim()) {
+        lines.push(line.trimEnd());
+        line = "";
+        size = 0;
+      }
+      if (!line && !word.trim()) continue;
+      for (const { segment } of segmenter.segment(word)) {
+        const cells = graphemeWidth(segment);
+        if (size + cells > width) {
+          if (line) lines.push(line.trimEnd());
+          line = "";
+          size = 0;
+        }
+        line += cells > width ? "�" : segment;
+        size += Math.min(cells, width);
       }
     }
-    const codePoint = text.codePointAt(index)!;
-    const character = String.fromCodePoint(codePoint);
-    result += character;
-    index += character.length;
-    visible += 1;
+    lines.push(line.trimEnd());
   }
-  return `${result}…${text.includes("\u001b[") ? RESET : ""}`;
+  return lines;
 }
 
 function fitRows(lines: string[], width: number | undefined, maxRows: number): string[] {

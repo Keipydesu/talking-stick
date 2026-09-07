@@ -29,6 +29,8 @@ import {
   actionConfiguration,
   buildChatInput,
   createMenuState,
+  filteredActions,
+  menuWindow,
   selectedAction,
   setMenuOption,
   updateMenu,
@@ -44,11 +46,14 @@ import {
 import { parseChatInput, type ParsedChatInput } from "./parse.js";
 import {
   completionCandidates,
+  activitySize,
   renderActionMenu,
   renderError,
   renderDashboard,
   renderEvent,
   renderFrame,
+  popupSize,
+  timelineLines,
   renderPalette,
   renderTeachingCommand,
   shortAgent
@@ -117,6 +122,14 @@ async function runFullScreenChatApp(options: ChatAppOptions): Promise<void> {
   let stopped = false;
   let finalMessage: string | null = null;
   let terminationSignal: "SIGINT" | "SIGTERM" | null = null;
+  let scrollOffset = 0;
+  const setState = (next: ChatState) => {
+    if (scrollOffset > 0) {
+      const size = activitySize(normalizeTerminalColumns(options.terminal.columns()), normalizeTerminalRows(options.terminal.rows?.()));
+      scrollOffset = Math.max(0, scrollOffset + timelineLines(next, size.width, false).length - timelineLines(state, size.width, false).length);
+    }
+    state = next;
+  };
 
   const driver = new FullScreenDriver(options.terminal, () => renderFrame({
     state,
@@ -125,6 +138,7 @@ async function runFullScreenChatApp(options: ChatAppOptions): Promise<void> {
     editor: editor.snapshot(),
     width: normalizeTerminalColumns(options.terminal.columns()),
     rows: normalizeTerminalRows(options.terminal.rows?.()),
+    scrollOffset,
     color
   }));
   const screen: ScreenOutput & { stateDriven: true } = {
@@ -202,6 +216,12 @@ async function runFullScreenChatApp(options: ChatAppOptions): Promise<void> {
     if (menu.stage !== "browse" && menu.stage !== "options") return;
     const action = selectedAction(menu);
     if (!action) return;
+    if (menu.stage === "browse" && !filteredActions(CHAT_ACTIONS, menu.filter).some((candidate) => candidate.id === action.id)) return;
+    if (action.id === "help") {
+      menu = updateMenu(menu, { type: "global_help" });
+      driver.redraw();
+      return;
+    }
     const snapshot = refreshMenuSnapshot();
     const configuration = actionConfiguration(menu, action);
     const availability = actionAvailability(action, snapshot, configuration);
@@ -289,9 +309,19 @@ async function runFullScreenChatApp(options: ChatAppOptions): Promise<void> {
       driver.redraw();
       return;
     }
-    if (menu.stage === "closed") {
+    if (menu.stage === "closed" && !editingMenuOption) {
       const current = editor.snapshot().value;
-      if (key.name === "tab" && current.length === 0) {
+      if (key.name === "pageup" || key.name === "pagedown" || (key.ctrl && (key.name === "u" || key.name === "d") && !current)) {
+        const direction = key.name === "pageup" || key.name === "u" ? 1 : -1;
+        const rows = normalizeTerminalRows(options.terminal.rows?.());
+        const size = activitySize(normalizeTerminalColumns(options.terminal.columns()), rows);
+        scrollOffset = Math.max(0, Math.min(
+          Math.max(0, timelineLines(state, size.width, false).length - size.rows),
+          scrollOffset + direction * Math.max(1, Math.floor((rows - 7) / 2))
+        ));
+      } else if (key.ctrl && key.name === "e" && !current) {
+        scrollOffset = 0;
+      } else if (key.name === "tab" && current.length === 0 && !editingMenuOption) {
         menu = updateMenu(menu, { type: "open" });
         refreshMenuSnapshot();
       } else if (character === "?" && current.length === 0) {
@@ -315,14 +345,31 @@ async function runFullScreenChatApp(options: ChatAppOptions): Promise<void> {
       return;
     }
     refreshMenuSnapshot();
-    if (key.name === "escape") {
+    if (menu.searching && menu.stage === "browse") {
+      if (key.name === "escape" || key.name === "return") {
+        menu = { ...menu, searching: false };
+      } else if (key.name === "backspace") {
+        menu = updateMenu(menu, { type: "backspace" });
+      } else if (character && !key.ctrl && !key.meta && /^[^\x00-\x1f\x7f]+$/u.test(character)) {
+        menu = updateMenu(menu, { type: "filter", value: character });
+      }
+    } else if (character === "/" && menu.stage === "browse") {
+      menu = { ...menu, searching: true, filter: "" };
+    } else if (character && /^[1-9]$/.test(character) && menu.stage === "browse") {
+      const size = popupSize(normalizeTerminalColumns(options.terminal.columns()), normalizeTerminalRows(options.terminal.rows?.()));
+      const action = menuWindow(menu, size.rows - 2)[Number(character) - 1];
+      if (action) menu = { ...menu, selectedActionId: action.id };
+    } else if (character && /^[1-9]$/.test(character) && menu.stage === "options") {
+      const index = Number(character) - 1;
+      if (index < (selectedAction(menu)?.options.length ?? 0)) menu = { ...menu, selectedOptionIndex: index };
+    } else if (key.name === "escape" || key.name === "tab") {
       menu = updateMenu(menu, { type: "escape" });
       if (menu.stage === "closed") menuSnapshot = null;
-    } else if (key.name === "up" || key.name === "down") {
-      menu = updateMenu(menu, { type: key.name });
-    } else if (key.name === "right") {
+    } else if (key.name === "up" || key.name === "down" || character === "j" || character === "k") {
+      menu = updateMenu(menu, { type: key.name === "up" || character === "k" ? "up" : "down" });
+    } else if (key.name === "right" || character === "l") {
       menu = updateMenu(menu, { type: "right" });
-    } else if (key.name === "left") {
+    } else if (key.name === "left" || character === "h") {
       menu = updateMenu(menu, { type: "left" });
     } else if (character === "?") {
       menu = updateMenu(menu, { type: "help" });
@@ -342,13 +389,15 @@ async function runFullScreenChatApp(options: ChatAppOptions): Promise<void> {
         editor.clear();
         editor.setPrompt(`${option.syntax}: `);
       }
-    } else if (menu.stage === "browse" && character && /^[A-Za-z0-9_-]$/.test(character)) {
-      menu = updateMenu(menu, { type: "filter", value: character });
     }
     driver.redraw();
   };
   const endHandler = () => stop();
-  const resizeCleanup = options.terminal.onResize(() => driver.redraw());
+  const resizeCleanup = options.terminal.onResize(() => {
+    const size = activitySize(normalizeTerminalColumns(options.terminal.columns()), normalizeTerminalRows(options.terminal.rows?.()));
+    scrollOffset = Math.min(scrollOffset, Math.max(0, timelineLines(state, size.width, false).length - size.rows));
+    driver.redraw();
+  });
   const interruptStop = () => {
     terminationSignal = "SIGINT";
     stop("Chat closed. You remain a room member.");
@@ -372,7 +421,7 @@ async function runFullScreenChatApp(options: ChatAppOptions): Promise<void> {
     ...options,
     roomId: joined.room_id,
     getState: () => state,
-    setState: (next) => { state = next; },
+    setState,
     screen,
     isStopped: () => stopped,
     stop,
@@ -387,12 +436,18 @@ async function runFullScreenChatApp(options: ChatAppOptions): Promise<void> {
         stop();
         break;
       }
+      if (line.trim() === "/" || line.trim() === "/help") {
+        menu = updateMenu(menu, { type: line.trim() === "/" ? "open" : "global_help" });
+        refreshMenuSnapshot();
+        driver.redraw();
+        continue;
+      }
       try {
         await executeInput(parseChatInput(line), {
           ...options,
           joined,
           getState: () => state,
-          setState: (next) => { state = next; },
+          setState,
           screen,
           nextLine,
           stop

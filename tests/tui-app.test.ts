@@ -142,7 +142,7 @@ describe("interactive room chat", () => {
   test("slash commands entered from global help still execute", async () => {
     const harness = startChat(tempDirs, { tty: true });
     try {
-      await waitFor(() => harness.outputText().includes("tt · project"));
+      await waitFor(() => harness.outputText().includes("talking-stick · turn"));
       harness.input.emit("keypress", "?", { name: "?" });
       await waitFor(() => harness.outputText().includes("ACTIONS & HELP"));
       for (const character of "/quit") {
@@ -155,6 +155,87 @@ describe("interactive room chat", () => {
       expect(harness.outputText()).toContain("\u001b[?1049h");
       expect(harness.outputText()).toContain("\u001b[?1049l");
       expect(harness.rawMode()).toBe(false);
+    } finally {
+      harness.close();
+    }
+  });
+
+  test("popup supports Vim navigation, numbered selection, search, and editing an option", async () => {
+    const harness = startChat(tempDirs, { tty: true });
+    const key = (name: string, character?: string) => harness.input.emit("keypress", character, { name });
+    try {
+      key("tab");
+      key("k", "k");
+      expect(harness.currentFrame()).toContain("> 8 notes");
+      key("j", "j");
+      expect(harness.currentFrame()).toContain("> 9 take");
+      key("3", "3");
+      expect(harness.currentFrame()).toContain("> 3 who");
+      key("return", "\r");
+      await waitFor(() => harness.outputText().includes("human:chat-test (you)"));
+      key("tab");
+      key("/", "/");
+      for (const char of "note") key(char, char);
+      key("return", "\r");
+      key("l", "l");
+      expect(harness.currentFrame()).toContain("note · options");
+      key("space", " ");
+      for (const char of "Keep the final detail") key(char, char);
+      key("return", "\r");
+      expect(harness.currentFrame()).toContain("Keep the final detail");
+      key("return", "\r");
+      const service = new TalkingStickService();
+      try {
+        const room = service.listRooms({ context_path: harness.project }).rooms[0];
+        await waitFor(() => service.listNotes({ room_id: room.room_id, agent_id: "human:chat-test" }).notes.length > 0);
+        expect(service.listNotes({ room_id: room.room_id, agent_id: "human:chat-test" }).notes[0].body).toBe("Keep the final detail");
+      } finally {
+        service.close();
+      }
+      for (const char of "/quit") key(char, char);
+      key("return", "\r");
+      await harness.app;
+      expect(harness.input.isPaused()).toBe(true);
+    } finally {
+      harness.close();
+    }
+  });
+
+  test("resize repaints the current dimensions while a popup and draft remain open", async () => {
+    const harness = startChat(tempDirs, { tty: true });
+    try {
+      harness.input.write("/sta");
+      harness.resize(60, 15);
+      expect(harness.currentFrame()).toContain("> /sta▏");
+      expect(harness.currentFrame()).toContain("\u001b[15;1H");
+      harness.input.write("\x15\t");
+      harness.resize(120, 32);
+      expect(harness.currentFrame()).toContain("ACTIONS");
+      expect(harness.currentFrame()).toContain("\u001b[32;1H");
+      harness.input.emit("keypress", undefined, { name: "escape" });
+      harness.input.write("/quit\r");
+      await harness.app;
+    } finally {
+      harness.close();
+    }
+  });
+
+  test("an empty popup search cannot execute the previous selection", async () => {
+    const harness = startChat(tempDirs, { tty: true });
+    const key = (name: string, character?: string) => harness.input.emit("keypress", character, { name });
+    try {
+      key("tab");
+      key("/", "/");
+      for (const char of "zzzz") key(char, char);
+      key("return", "\r");
+      key("return", "\r");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(harness.currentFrame()).toContain("No matching actions");
+      expect(roomEvents(harness.project).some((event) => event.event_type === "takeover")).toBe(false);
+      key("escape");
+      for (const char of "/quit") key(char, char);
+      key("return", "\r");
+      await harness.app;
     } finally {
       harness.close();
     }
@@ -345,6 +426,9 @@ function startChat(
   const output = new PassThrough();
   let captured = "";
   let rawMode = false;
+  let columns = 100;
+  let rows = 30;
+  let resizeListener = () => undefined as void;
   output.setEncoding("utf8");
   output.on("data", (chunk: string) => {
     captured += chunk;
@@ -358,9 +442,9 @@ function startChat(
     setRawMode: (enabled) => {
       rawMode = enabled;
     },
-    columns: () => 100,
-    rows: () => 30,
-    onResize: () => () => undefined
+    columns: () => columns,
+    rows: () => rows,
+    onResize: (listener) => { resizeListener = listener; return () => { resizeListener = () => undefined; }; }
   };
   const identity = deriveHumanCliIdentity({
     agentId: "human:chat-test",
@@ -381,6 +465,8 @@ function startChat(
     input,
     project,
     outputText: () => captured,
+    currentFrame: () => captured.slice(captured.lastIndexOf("\u001b[H")),
+    resize: (width: number, height: number) => { columns = width; rows = height; resizeListener(); },
     rawMode: () => rawMode,
     setRawMode: (enabled: boolean) => {
       rawMode = enabled;

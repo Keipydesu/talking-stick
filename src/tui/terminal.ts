@@ -134,7 +134,8 @@ export class FullScreenDriver {
     this.active = true;
     this.restored = false;
     this.terminal.setRawMode?.(true);
-    this.terminal.output.write(`${ENTER_ALT_SCREEN}${HIDE_CURSOR}`);
+    this.terminal.input.resume();
+    this.terminal.output.write(`${ENTER_ALT_SCREEN}${HIDE_CURSOR}\u001b[?7l`);
     process.on("uncaughtExceptionMonitor", this.restoreListener);
     process.on("exit", this.restoreListener);
     this.redraw();
@@ -156,7 +157,10 @@ export class FullScreenDriver {
     process.off("uncaughtExceptionMonitor", this.restoreListener);
     process.off("exit", this.restoreListener);
     this.terminal.setRawMode?.(this.initialRawMode);
-    this.terminal.output.write(`${SHOW_CURSOR}${LEAVE_ALT_SCREEN}`);
+    this.terminal.output.write(`\u001b[?7h${SHOW_CURSOR}${LEAVE_ALT_SCREEN}`);
+    // emitKeypressEvents leaves stdin flowing even after the last listener is
+    // removed. A live TTY read keeps Node alive after an otherwise clean quit.
+    this.terminal.input.pause();
   }
 }
 

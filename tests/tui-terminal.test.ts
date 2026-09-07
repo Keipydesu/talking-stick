@@ -1,5 +1,7 @@
 import readline from "node:readline";
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { PassThrough } from "node:stream";
 import { describe, expect, test } from "vitest";
@@ -165,6 +167,27 @@ describe("chat screen", () => {
       expect(output, mode).toContain("\u001b[?25h\u001b[?1049l");
     }
   });
+
+  ptyTest("/quit exits the actual CLI with live stdin and restores terminal modes", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tt-quit-pty-"));
+    try {
+      const result = spawnSync("python3", [
+        "-c", PTY_EXIT_PROBE, "quit", process.execPath, "--import", "tsx",
+        path.join(process.cwd(), "src/cli.ts"), "chat", directory, "--agent", "human:quit-probe"
+      ], {
+        encoding: "utf8",
+        env: { ...process.env, TALKING_STICK_DATA_DIR: directory, NO_COLOR: "1" },
+        timeout: 10_000
+      });
+      const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+      expect(output).not.toContain("__TIMEOUT__");
+      expect(output).toContain("__EXIT__=0");
+      expect(output).toContain("Chat closed. You remain a room member.");
+      expect(output).toContain("\u001b[?7h\u001b[?25h\u001b[?1049l");
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 const PTY_EXIT_PROBE = [
@@ -173,9 +196,16 @@ const PTY_EXIT_PROBE = [
   "cmd=sys.argv[2:]",
   "pid,fd=pty.fork()",
   "if pid==0: os.execv(cmd[0],cmd)",
-  "time.sleep(0.4)",
-  "os.write(fd,b'\\x03') if mode=='ctrl-c' else os.kill(pid, signal.SIGINT if mode=='sigint' else signal.SIGTERM)",
   "data=b''",
+  "deadline=time.time()+5",
+  "while b'\\x1b[?1049h' not in data and time.time()<deadline:",
+  " ready,_,_=select.select([fd],[],[],0.1)",
+  " if ready:",
+  "  try: data+=os.read(fd,65536)",
+  "  except OSError: break",
+  "if mode=='quit': os.write(fd,b'/quit\\r')",
+  "elif mode=='ctrl-c': os.write(fd,b'\\x03')",
+  "else: os.kill(pid, signal.SIGINT if mode=='sigint' else signal.SIGTERM)",
   "status=None",
   "deadline=time.time()+5",
   "while status is None and time.time()<deadline:",

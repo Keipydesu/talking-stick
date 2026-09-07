@@ -2,10 +2,10 @@ import { describe, expect, test } from "vitest";
 import { createTheme, identityColorIndex } from "../src/tui/theme.js";
 
 describe("TUI theme", () => {
-  test("assigns stable 256-color identities", () => {
+  test("assigns stable theme-defined ANSI identities", () => {
     expect(identityColorIndex("codex:one")).toBe(identityColorIndex("codex:one"));
     expect(createTheme({ isTTY: true, env: {} }).identity("codex:one", "codex"))
-      .toMatch(/\u001b\[38;5;\d+m/);
+      .toMatch(/\u001b\[(?:3[246]|9[246])m/);
   });
 
   test("honors non-TTY, NO_COLOR, and dumb terminals", () => {

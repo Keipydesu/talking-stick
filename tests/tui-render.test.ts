@@ -16,7 +16,10 @@ import {
   renderStatusBar,
   renderTeachingCommand,
   shellQuote,
-  stripAnsi
+  stripAnsi,
+  cellWidth,
+  timelineLines,
+  wrapText
 } from "../src/tui/render.js";
 import {
   normalizeTerminalColumns,
@@ -79,13 +82,13 @@ describe("chat rendering", () => {
 
     const dashboard = renderDashboard(state, { color: true, width: 100 });
     expect(dashboard.every((line) => stripAnsi(line).length === 100)).toBe(true);
-    expect(dashboard.join("\n")).toMatch(/\u001b\[38;5;\d+m/);
+    expect(dashboard.join("\n")).toMatch(/\u001b\[(?:3[246]|9[246])m/);
 
     const coloredMessage = renderEvent(
       { historical: false, event: messageEvent() },
       { color: true }
     );
-    expect(coloredMessage).toMatch(/\u001b\[38;5;\d+m/);
+    expect(coloredMessage).toMatch(/\u001b\[(?:3[246]|9[246])m/);
     expect(stripAnsi(coloredMessage)).toContain("claude");
   });
 
@@ -112,16 +115,20 @@ describe("chat rendering", () => {
     expect(frame).toHaveLength(24);
     expect(frame.every((line) => stripAnsi(line).length === 100)).toBe(true);
     expect(frame.join("\n")).toContain("MEMBERS");
-    expect(frame.join("\n")).toContain("◆ Claude");
-    expect(frame.join("\n")).toContain("○ Codex");
+    expect(frame.join("\n")).toContain("o-- Claude");
+    expect(frame.join("\n")).toContain("○  Codex");
     expect(frame.join("\n")).toContain("/repo/talking-stick");
-    expect(frame.join("\n")).toContain("stick: Claude");
+    expect(frame[0]).toContain("turn 24 · owned");
+    expect(frame.join("\n")).not.toContain("stick: Claude");
+    expect(frame.join("\n")).not.toContain("[stick]");
+    expect(frame[1]).toContain("│  MEMBERS");
+    expect(frame[2]).toContain("┤  ");
     expect(frame.at(-2)).toContain("> /sta▏");
     expect(stripAnsi(frame[0])).not.toContain("MEMBERS");
     expect(stripAnsi(frame[1])).toContain("MEMBERS");
     expect(stripAnsi(frame[1]).startsWith("│")).toBe(true);
     expect(stripAnsi(frame[4]).startsWith("│")).toBe(true);
-    expect(stripAnsi(frame[3])).toContain("┤");
+    expect(stripAnsi(frame[2])).toContain("┤");
   });
 
   test("renders actions as an overlay without hiding unavailable choices", () => {
@@ -161,6 +168,68 @@ describe("chat rendering", () => {
 
     expect(activityRow).toBeDefined();
     expect(stripAnsi(activityRow ?? "").slice(0, 72).endsWith("…")).toBe(false);
+  });
+
+  test("closes the entire top border on the first frame", () => {
+    const frame = renderFrame({ state: createChatState(joinResult()), menu: createMenuState(), capability: null,
+      editor: { prompt: "> ", value: "", cursor: 0 }, width: 100, rows: 24 });
+    expect(frame[0]).toMatch(/─+┬─+┐$/);
+    expect(frame.slice(1, -3).every((line) => line.endsWith("│"))).toBe(true);
+  });
+
+  test("wraps long member labels in the sidebar", () => {
+    const state = createChatState(joinResult());
+    state.members = [{ agent_id: "human:me", status: "active", display_name: "operator-with-a-long-name" }];
+    const frame = renderFrame({ state, menu: createMenuState(), capability: null,
+      editor: { prompt: "> ", value: "", cursor: 0 }, width: 80, rows: 24 });
+    const sidebar = frame.slice(1, -3).map((line) => line.slice(58, -1).trim()).join(" ");
+    expect(sidebar).toContain("(you)");
+    expect(sidebar).not.toContain("…");
+  });
+
+  test("wraps complete message and handoff bodies when resized", () => {
+    const state = createChatState(joinResult());
+    const body = "A readable message with enough words to span several lines, including the final detail.";
+    state.events = [
+      { historical: true, event: { ...messageEvent(), payload: { body, delivery_hint: "normal" } } },
+      { historical: true, event: { ...messageEvent(), event_type: "pass", payload: null,
+        handoff: { status: body, next_action: "Review the final detail." } } }
+    ];
+    for (const width of [28, 60, 100]) {
+      const lines = timelineLines(state, width, false);
+      expect(lines.every((line) => cellWidth(line) <= width)).toBe(true);
+      const text = lines.join(" ").replace(/\s+/g, " ");
+      expect(text).toContain(body);
+      expect(text).toContain("Next: Review the final detail.");
+      expect(text).not.toContain("…");
+    }
+    expect(timelineLines(state, 28, false).length).toBeGreaterThan(timelineLines(state, 100, false).length);
+  });
+
+  test("scrolling reveals earlier timeline content and returns to the latest event", () => {
+    const state = createChatState(joinResult());
+    state.events = Array.from({ length: 30 }, (_, i) => ({ historical: false,
+      event: { ...messageEvent(), event_seq: i + 1, payload: { body: `message-${i}`, delivery_hint: "normal" } } }));
+    const input = { state, menu: createMenuState(), capability: null,
+      editor: { prompt: "> ", value: "", cursor: 0 }, width: 100, rows: 20, color: false };
+    expect(renderFrame(input).join("\n")).toContain("message-29");
+    const scrolled = renderFrame({ ...input, scrollOffset: 10_000 }).join("\n");
+    expect(scrolled).toContain("message-0");
+    expect(scrolled).not.toContain("message-29");
+  });
+
+  test("fits wide and combining characters and keeps a long input cursor visible", () => {
+    expect(cellWidth("你好 👩‍💻 é")).toBe(9);
+    expect(wrapText("你好👩‍💻é", 4)).toEqual(["你好", "👩‍💻é"]);
+    const state = createChatState(joinResult());
+    state.events = [{ historical: false, event: { ...messageEvent(), payload: { body: "你好 👩‍💻 é ".repeat(20), delivery_hint: "normal" } } }];
+    for (const [width, cursor] of [[40, 330], [80, 220], [120, 330]]) {
+      const frame = renderFrame({ state, menu: createMenuState(), capability: null,
+        editor: { prompt: "> ", value: "long input ".repeat(30), cursor }, width, rows: 24, color: true });
+      expect(frame.every((line) => cellWidth(line) === width)).toBe(true);
+      expect(frame.at(-2)).toContain("▏");
+      expect(frame.at(-2)).toContain("‹");
+    }
   });
 
   test("degrades safely for tiny and sizeless terminal dimensions", () => {
