@@ -39,6 +39,7 @@ describe("interactive room chat", () => {
       expect(harness.outputText()).toContain("→ tt msg send room 'hello from chat'");
       expect(harness.outputText()).toContain("You remain a room member");
       expect(harness.outputText()).not.toContain("-- project ·");
+      expect(harness.outputText()).not.toContain("\u001b[?1049h");
       expect(roomEvents(harness.project).filter(
         (event) => event.payload?.body === "hello from chat"
       )).toHaveLength(1);
@@ -59,6 +60,101 @@ describe("interactive room chat", () => {
 
       expect(Date.now() - startedAt).toBeLessThan(2_000);
       expect(harness.outputText()).not.toContain("Chat stopped:");
+    } finally {
+      harness.close();
+    }
+  });
+
+  test("restores terminal state and removes process recovery listeners", async () => {
+    const uncaughtListeners = process.listenerCount("uncaughtExceptionMonitor");
+    const exitListeners = process.listenerCount("exit");
+    const harness = startChat(tempDirs);
+    try {
+      await waitFor(() => harness.outputText().includes("Type a message"));
+      harness.setRawMode(true);
+      harness.input.write("/quit\n");
+      await harness.app;
+
+      expect(harness.rawMode()).toBe(false);
+      expect(process.listenerCount("uncaughtExceptionMonitor")).toBe(uncaughtListeners);
+      expect(process.listenerCount("exit")).toBe(exitListeners);
+    } finally {
+      harness.close();
+    }
+  });
+
+  test("empty-line Tab opens the action menu and runs the selected action", async () => {
+    const harness = startChat(tempDirs);
+    try {
+      await waitFor(() => harness.outputText().includes("Type a message"));
+      harness.input.emit("keypress", undefined, { name: "tab" });
+      harness.input.emit("keypress", "w", { name: "w" });
+      harness.input.emit("keypress", "h", { name: "h" });
+      harness.input.emit("keypress", "o", { name: "o" });
+      harness.input.write("\n");
+
+      await waitFor(() => harness.outputText().includes("→ tt state"));
+      harness.input.write("/quit\n");
+      await harness.app;
+
+      expect(harness.outputText()).toContain("● human:chat-test (you)");
+    } finally {
+      harness.close();
+    }
+  });
+
+  test("execution guard agrees with the menu's unavailable handoff reason", async () => {
+    const harness = startChat(tempDirs);
+    try {
+      await waitFor(() => harness.outputText().includes("Type a message"));
+      harness.input.write("/release\n");
+      await waitFor(() => harness.outputText().includes("Unavailable: you need the stick"));
+      harness.input.write("/quit\n");
+      await harness.app;
+    } finally {
+      harness.close();
+    }
+  });
+
+  test("buffered text cannot accidentally run the highlighted menu action", async () => {
+    const harness = startChat(tempDirs);
+    try {
+      await waitFor(() => harness.outputText().includes("Type a message"));
+      harness.input.emit("keypress", undefined, { name: "tab" });
+      harness.input.write("leave\n");
+      await waitFor(() => harness.outputText().includes("Menu selection not run"));
+
+      const service = new TalkingStickService();
+      try {
+        expect(service.listRooms({ context_path: harness.project }).rooms[0]?.owner).toBeNull();
+      } finally {
+        service.close();
+      }
+
+      harness.input.emit("keypress", undefined, { name: "escape" });
+      harness.input.write("/quit\n");
+      await harness.app;
+    } finally {
+      harness.close();
+    }
+  });
+
+  test("slash commands entered from global help still execute", async () => {
+    const harness = startChat(tempDirs, { tty: true });
+    try {
+      await waitFor(() => harness.outputText().includes("tt · project"));
+      harness.input.emit("keypress", "?", { name: "?" });
+      await waitFor(() => harness.outputText().includes("ACTIONS & HELP"));
+      for (const character of "/quit") {
+        harness.input.emit("keypress", character, { name: character });
+      }
+      harness.input.emit("keypress", "\r", { name: "return" });
+      await harness.app;
+
+      expect(harness.outputText()).toContain("You remain a room member");
+      expect(harness.outputText()).toContain("\u001b[?1049h");
+      expect(harness.outputText()).toContain("\u001b[?1049l");
+      expect(harness.rawMode()).toBe(false);
     } finally {
       harness.close();
     }
@@ -236,7 +332,7 @@ describe("interactive room chat", () => {
 
 function startChat(
   tempDirs: string[],
-  settings: { productionPoll?: boolean } = {}
+  settings: { productionPoll?: boolean; tty?: boolean } = {}
 ) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "talking-stick-chat-"));
   tempDirs.push(dataDir);
@@ -248,6 +344,7 @@ function startChat(
   const input = new PassThrough();
   const output = new PassThrough();
   let captured = "";
+  let rawMode = false;
   output.setEncoding("utf8");
   output.on("data", (chunk: string) => {
     captured += chunk;
@@ -255,9 +352,14 @@ function startChat(
   const terminal: ChatTerminal = {
     input,
     output,
-    inputIsTTY: false,
-    outputIsTTY: false,
+    inputIsTTY: settings.tty === true,
+    outputIsTTY: settings.tty === true,
+    isRaw: () => rawMode,
+    setRawMode: (enabled) => {
+      rawMode = enabled;
+    },
     columns: () => 100,
+    rows: () => 30,
     onResize: () => () => undefined
   };
   const identity = deriveHumanCliIdentity({
@@ -279,6 +381,10 @@ function startChat(
     input,
     project,
     outputText: () => captured,
+    rawMode: () => rawMode,
+    setRawMode: (enabled: boolean) => {
+      rawMode = enabled;
+    },
     close: () => {
       input.end();
       runtime.close();

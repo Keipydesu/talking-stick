@@ -3,6 +3,8 @@ import type { JoinPathResult, RoomEvent } from "../src/index.js";
 import {
   createChatState,
   hasSelfRemoval,
+  MAX_CHAT_EVENTS,
+  MAX_CHAT_NOTICES,
   updateChatState
 } from "../src/tui/model.js";
 
@@ -44,6 +46,16 @@ describe("chat model", () => {
     expect(state.events[0].historical).toBe(true);
   });
 
+  test("keeps the requested working directory separate from the room root", () => {
+    const joined = joinResult();
+    joined.requested_path = "/repo/packages/cli";
+    joined.canonical_path = "/repo";
+    const state = createChatState(joined);
+
+    expect(state.workingDirectory).toBe("/repo/packages/cli");
+    expect(state.canonicalPath).toBe("/repo");
+  });
+
   test("room-state refreshes never advance the event cursor", () => {
     const initial = createChatState(joinResult());
     const state = updateChatState(initial, {
@@ -55,6 +67,29 @@ describe("chat model", () => {
       }
     });
     expect(state.cursor).toBe(10);
+  });
+
+  test("caps semantic event and notice history", () => {
+    let state = createChatState(joinResult());
+    state = updateChatState(state, {
+      type: "events",
+      events: Array.from({ length: MAX_CHAT_EVENTS + 5 }, (_, index) =>
+        event(index + 20, "message_sent", "claude:2", null)
+      )
+    });
+    for (let index = 0; index < MAX_CHAT_NOTICES + 5; index += 1) {
+      state = updateChatState(state, { type: "notice", text: `notice ${index}` });
+    }
+
+    expect(state.events).toHaveLength(MAX_CHAT_EVENTS);
+    expect(state.events[0].event.event_seq).toBe(25);
+    expect(state.notices).toHaveLength(MAX_CHAT_NOTICES);
+    expect(state.notices[0].text).toBe("notice 5");
+    expect(state.activity).toHaveLength(MAX_CHAT_EVENTS);
+    expect(state.activity.at(-1)).toMatchObject({
+      kind: "notice",
+      notice: { text: `notice ${MAX_CHAT_NOTICES + 4}` }
+    });
   });
 
   test("detects self removal and room closure", () => {

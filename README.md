@@ -244,6 +244,25 @@ prompts handle structured handoffs such as `/release` and `/assign`, and Tab
 completes action and member names. The UI echoes the equivalent `tt` command
 after each action so it also teaches the underlying CLI.
 
+On a terminal, chat opens a full-pane alternate-screen workspace that repaints
+in place instead of filling scrollback. A fixed header shows the room, current
+working directory, and turn state; recent activity stays in the main pane; and
+a member sidebar shows active (`●`), inactive (`○`), and stick-holding (`◆`)
+participants. Stable per-identity 256-color styling distinguishes people and
+agents, while the labels and symbols preserve every distinction without color.
+`NO_COLOR` and `TERM=dumb` are honored. Redirected input or output uses the
+line-oriented fallback and never enters the alternate screen.
+
+Press Tab on an empty prompt to open the action menu. Every action remains
+visible, including unavailable actions and the reason they cannot currently
+run. Use Up/Down to select, Right to edit options, Space to edit or toggle the
+highlighted option, Enter to run, `?` for contextual help, and Escape to go
+back. The options view previews the exact equivalent `tt` command before it
+runs. Tab retains normal slash-command and member completion whenever the input
+line is not empty. The input line also supports Left/Right, Ctrl-A/E/U/K/W,
+and Up/Down command history. The primary screen and raw-mode setting are
+restored on normal exit, signals, and unexpected errors.
+
 Use `/quit` to close chat while remaining a room member, or `/leave` to remove
 your membership. Chat never takes the stick automatically. If you explicitly
 use `/take`, a normal lease guardian protects the turn; chat will refuse to

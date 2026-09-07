@@ -5,6 +5,10 @@ import type {
   RoomEvent
 } from "../index.js";
 
+export const MAX_CHAT_EVENTS = 200;
+export const MAX_CHAT_NOTICES = 50;
+export const MAX_CHAT_ACTIVITY = 200;
+
 export interface ChatMember {
   agent_id: string;
   status: "active" | "inactive";
@@ -21,15 +25,21 @@ export interface ChatNotice {
   text: string;
 }
 
+export type ChatActivity =
+  | { kind: "event"; entry: ChatEventEntry }
+  | { kind: "notice"; notice: ChatNotice };
+
 export interface ChatState {
   roomId: string;
   canonicalPath: string;
+  workingDirectory: string;
   selfAgentId: string;
   room: PathRoom;
   members: ChatMember[];
   cursor: number;
   events: ChatEventEntry[];
   notices: ChatNotice[];
+  activity: ChatActivity[];
   stoppedReason: string | null;
 }
 
@@ -43,12 +53,14 @@ export function createChatState(joined: JoinPathResult): ChatState {
   return {
     roomId: joined.room_id,
     canonicalPath: joined.canonical_path,
+    workingDirectory: joined.requested_path,
     selfAgentId: joined.agent_id,
     room: joined.room_state,
     members: joined.members.map((member) => ({ ...member })),
     cursor: joined.cursor_event_seq,
     events: [],
     notices: [],
+    activity: [],
     stoppedReason: null
   };
 }
@@ -78,7 +90,14 @@ export function updateChatState(
             event,
             historical: update.historical === true
           }))
-        ]
+        ].slice(-MAX_CHAT_EVENTS),
+        activity: [
+          ...state.activity,
+          ...update.events.map((event): ChatActivity => ({
+            kind: "event",
+            entry: { event, historical: update.historical === true }
+          }))
+        ].slice(-MAX_CHAT_ACTIVITY)
       };
     }
     case "room_state":
@@ -92,12 +111,17 @@ export function updateChatState(
         }))
       };
     case "notice":
+      const notice = { level: update.level ?? "info", text: update.text };
       return {
         ...state,
         notices: [
           ...state.notices,
-          { level: update.level ?? "info", text: update.text }
-        ]
+          notice
+        ].slice(-MAX_CHAT_NOTICES),
+        activity: [
+          ...state.activity,
+          { kind: "notice", notice } as ChatActivity
+        ].slice(-MAX_CHAT_ACTIVITY)
       };
     case "stop":
       return { ...state, stoppedReason: update.reason };
